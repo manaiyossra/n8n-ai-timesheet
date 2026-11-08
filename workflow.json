@@ -1,0 +1,148 @@
+{
+  "name": "AI Timesheet - Weekly",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                5
+              ],
+              "triggerAtHour": 18
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "89b9de66-9e20-45f6-8600-f6ae9c307d8f",
+      "name": "Every Friday"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ffbdd07d-aa7f-4e71-9872-0fb5ed8dfb49",
+              "name": "username",
+              "value": "manaiyossra",
+              "type": "string"
+            },
+            {
+              "id": "0d75a769-45e4-4dc6-8359-09b49484e29d",
+              "name": "since",
+              "value": "={{ $now.minus({ days: 7 }).toFormat('yyyy-MM-dd') }}",
+              "type": "string"
+            },
+            {
+              "id": "df820f5f-ef16-4cc6-be1c-d04b0094d752",
+              "name": "until",
+              "value": "={{ $now.toFormat('yyyy-MM-dd') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        224,
+        0
+      ],
+      "id": "498356e9-3ae2-48be-adda-ad3df7e8144a",
+      "name": "Week range"
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/search/commits",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "=   {{ 'author:' + $json.username + ' committer-date:' + $json.since + '..' + $json.until }}"
+            },
+            {
+              "name": "per_page",
+              "value": "100"
+            },
+            {
+              "name": "sort",
+              "value": "committer-date"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        448,
+        0
+      ],
+      "id": "479ab2d1-a211-4d49-a85a-f19c255ef490",
+      "name": "GitHub Commits",
+      "credentials": {
+        "githubApi": {
+          "id": "DgtLtBQkqmiwyMSA",
+          "name": "GitHub account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every Friday": {
+      "main": [
+        [
+          {
+            "node": "Week range",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Week range": {
+      "main": [
+        [
+          {
+            "node": "GitHub Commits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "fda28301-7e06-4ecd-a878-02ba603970ef",
+  "meta": {
+    "instanceId": "0ca56eeca722094a14943af0c513e71b5fe87c717536d5ad80abe2c92cc309dc"
+  },
+  "nodeGroups": [],
+  "id": "mtxQzx5g1oh4lCys",
+  "tags": []
+}
