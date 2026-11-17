@@ -37,7 +37,7 @@
             {
               "id": "0d75a769-45e4-4dc6-8359-09b49484e29d",
               "name": "since",
-              "value": "={{ $now.minus({ days: 7 }).toFormat('yyyy-MM-dd') }}",
+              "value": "={{ $now.minus({ days: 30 }).toFormat('yyyy-MM-dd') }}",
               "type": "string"
             },
             {
@@ -106,6 +106,131 @@
           "name": "GitHub account"
         }
       }
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/search/issues",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "githubApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ 'author:' + $('Week range').item.json.username + ' type:pr updated:' + $('Week range').item.json.since + '..' + $('Week range').item.json.until }} "
+            },
+            {
+              "name": "per_page",
+              "value": "100"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        688,
+        0
+      ],
+      "id": "265defab-0687-4520-964f-0891c88c53b9",
+      "name": "GitHub PRs",
+      "credentials": {
+        "githubApi": {
+          "id": "DgtLtBQkqmiwyMSA",
+          "name": "GitHub account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const range = $('Week range').first().json;\nconst commitItems = $('GitHub Commits').first().json.items || [];\nconst prItems = $('GitHub PRs').first().json.items || [];\n\nconst commits = commitItems.map(c => ({\n  repo: c.repository.full_name,\n  day: c.commit.author.date.slice(0, 10),\n  time: c.commit.author.date.slice(11, 16),\n  message: c.commit.message.split('\\n')[0],\n  sha: c.sha.slice(0, 7),\n}));\n\nconst prs = prItems.map(p => ({\n  repo: p.repository_url.split('/').slice(-2).join('/'),\n  number: p.number,\n  title: p.title,\n  state: p.state,\n  created_day: p.created_at.slice(0, 10),\n  updated_day: p.updated_at.slice(0, 10),\n}));\n\nreturn [{\n  json: {\n    since: range.since,\n    until: range.until,\n    commit_count: commits.length,\n    pr_count: prs.length,\n    commits,\n    prs,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        0
+      ],
+      "id": "5ff0f22c-76ac-40de-9e83-3f3b65d20d0f",
+      "name": "Prepare activity"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'qwen2.5:7b',\n  stream: false,\n  options: { temperature: 0 },\n  format: {\n    type: 'object',\n    properties: {\n      entries: {\n        type: 'array',\n        items: {\n          type: 'object',\n          properties: {\n            project: { type: 'string' },\n            date: { type: 'string' },\n            description: { type: 'string' },\n            estimated_hours: { type: 'number' }\n          },\n          required: ['project', 'date', 'description', 'estimated_hours']\n        }\n      }\n    },\n    required: ['entries']\n  },\n  messages: [\n    {\n      role: 'system',\n      content: 'You are an assistant that prepares a developer weekly timesheet from GitHub activity. Rules: (1) Create ONE entry per project (repo) per day that has activity. (2) Ignore merge commits (messages starting with \"Merge\"). (3) description: one short English sentence summarizing the real work done that day on that project. (4) estimated_hours: between 0.5 and 8, in steps of 0.5, based on the number and size of the changes. (5) date format YYYY-MM-DD, only dates present in the activity. (6) Never invent work that is not in the data. Return only JSON.'\n    },\n    {\n      role: 'user',\n      content: 'GitHub activity from ' + $json.since + ' to ' + $json.until + ':\\n' + JSON.stringify({ commits: $json.commits, prs: $json.prs })\n    }\n  ]\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1136,
+        0
+      ],
+      "id": "8137d15c-d766-47df-9a7c-71d061281654",
+      "name": "Ollama - propose entries"
+    },
+    {
+      "parameters": {
+        "jsCode": "const activity = $('Prepare activity').first().json;\nconst raw = $input.first().json.message?.content ?? '';\n\n// 0. Parse the LLM answer\nlet entries;\ntry {\n  entries = JSON.parse(raw).entries;\n} catch (e) {\n  throw new Error('LLM did not return valid JSON: ' + raw.slice(0, 200));\n}\nif (!Array.isArray(entries)) throw new Error('LLM JSON has no \"entries\" array');\n\nconst warnings = [];\nconst inRange = d => d >= activity.since && d <= activity.until;\n\n// 1. Normalize, reject invalid dates or durations\nconst valid = [];\nfor (const e of entries) {\n  const date = String(e.date || '').slice(0, 10);\n  const hours = Math.round(Number(e.estimated_hours) * 2) / 2;\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(date) || !inRange(date)) {\n    warnings.push(`Rejected entry with invalid date \"${e.date}\" (${e.project})`);\n    continue;\n  }\n  if (!(hours > 0)) {\n    warnings.push(`Rejected entry with invalid duration (${e.project}, ${date})`);\n    continue;\n  }\n  valid.push({\n    project: String(e.project).trim(),\n    date,\n    description: String(e.description).trim(),\n    estimated_hours: Math.min(hours, 8),\n  });\n}\n\n// 2. Duplicates: same project + same date -> merge\nconst byKey = new Map();\nfor (const e of valid) {\n  const key = e.project + '|' + e.date;\n  if (byKey.has(key)) {\n    const prev = byKey.get(key);\n    warnings.push(`Duplicate entry merged: ${e.project} on ${e.date}`);\n    prev.estimated_hours = Math.min(prev.estimated_hours + e.estimated_hours, 8);\n    if (prev.description !== e.description) prev.description += ' ' + e.description;\n  } else {\n    byKey.set(key, { ...e });\n  }\n}\nconst finalEntries = [...byKey.values()].sort(\n  (a, b) => a.date.localeCompare(b.date) || a.project.localeCompare(b.project)\n);\n\n// 3. Days with commits but no timesheet entry\nconst activityKeys = new Set(\n  activity.commits\n    .filter(c => !c.message.startsWith('Merge'))\n    .map(c => c.repo + '|' + c.day)\n);\nfor (const k of activityKeys) {\n  if (!byKey.has(k)) {\n    const [repo, day] = k.split('|');\n    warnings.push(`Activity without entry: ${repo} on ${day}`);\n  }\n}\n\n// 4. Total hours per day\nconst hoursPerDay = {};\nfor (const e of finalEntries) {\n  hoursPerDay[e.date] = (hoursPerDay[e.date] || 0) + e.estimated_hours;\n}\nfor (const [d, h] of Object.entries(hoursPerDay)) {\n  if (h > 10) warnings.push(`More than 10h on ${d} (${h}h)`);\n}\n\n// 5. Weekdays (Mon-Fri) with no activity\nconst emptyWeekdays = [];\nconst end = new Date(activity.until + 'T00:00:00Z');\nfor (let d = new Date(activity.since + 'T00:00:00Z'); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {\n  const iso = d.toISOString().slice(0, 10);\n  const wd = d.getUTCDay();\n  if (wd >= 1 && wd <= 5 && !hoursPerDay[iso]) emptyWeekdays.push(iso);\n}\n\nconst totalHours = finalEntries.reduce((s, e) => s + e.estimated_hours, 0);\n\nreturn [{\n  json: {\n    since: activity.since,\n    until: activity.until,\n    entry_count: finalEntries.length,\n    total_hours: totalHours,\n    hours_per_day: hoursPerDay,\n    empty_weekdays: emptyWeekdays,\n    warnings,\n    entries: finalEntries,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        0
+      ],
+      "id": "54eb6ab7-ad39-4409-9126-7abc95da4791",
+      "name": "Validate entries"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "entries",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1.1,
+      "position": [
+        1584,
+        0
+      ],
+      "id": "5fe0df4a-087e-4166-94a5-a9a4c0faacd2",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO timesheet_entries\n  (project, entry_date, description, estimated_hours, week_start, week_end)\nVALUES ($1, $2, $3, $4, $5, $6)\nON CONFLICT (project, entry_date) DO UPDATE SET\n  description     = EXCLUDED.description,\n  estimated_hours = EXCLUDED.estimated_hours,\n  week_start      = EXCLUDED.week_start,\n  week_end        = EXCLUDED.week_end\nRETURNING id, project, entry_date, estimated_hours;",
+        "options": {
+          "queryReplacement": "={{ [ $json.project, $json.date, $json.description, $json.estimated_hours, $('Validate entries').first().json.since, $('Validate entries').first().json.until ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        1808,
+        0
+      ],
+      "id": "90a524e1-1e93-408a-b48f-5a2b518d2c47",
+      "name": "Save to PostgreSQL",
+      "credentials": {
+        "postgres": {
+          "id": "1Goh6PbwgOxV0sB5",
+          "name": "Postgres account"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -131,6 +256,72 @@
           }
         ]
       ]
+    },
+    "GitHub Commits": {
+      "main": [
+        [
+          {
+            "node": "GitHub PRs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GitHub PRs": {
+      "main": [
+        [
+          {
+            "node": "Prepare activity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare activity": {
+      "main": [
+        [
+          {
+            "node": "Ollama - propose entries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama - propose entries": {
+      "main": [
+        [
+          {
+            "node": "Validate entries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate entries": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "Save to PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -138,8 +329,9 @@
     "executionOrder": "v1",
     "binaryMode": "separate"
   },
-  "versionId": "fda28301-7e06-4ecd-a878-02ba603970ef",
+  "versionId": "684d5662-f4ae-45cf-b171-e603fd867407",
   "meta": {
+    "templateCredsSetupCompleted": true,
     "instanceId": "0ca56eeca722094a14943af0c513e71b5fe87c717536d5ad80abe2c92cc309dc"
   },
   "nodeGroups": [],
